@@ -1,15 +1,26 @@
 /**
- * Meta Lead Ads -> IFCO Yaka Kartı Entegrasyonu
+ * Meta Lead Ads -> IFCO Yaka Kartı Entegrasyonu (POLLING SÜRÜMÜ)
  * ------------------------------------------------
- * 1) Meta webhook doğrulama (GET /webhook)
- * 2) Meta webhook bildirimi alma (POST /webhook)
- * 3) Graph API'den lead detayını çekme
- * 4) IFCO referans verileriyle eşleştirme (ülke, şehir, unvan, ürün grubu)
- * 5) IFCO /badge/store endpoint'ine kayıt
+ * Lead Access Manager izin sorunu nedeniyle webhook bildirimleri
+ * sunucuya ulaşamadığından, bu sürüm periyodik olarak (polling)
+ * sayfanın tüm formlarını Graph API üzerinden tarar ve yeni lead'leri
+ * bulup IFCO'ya kaydeder.
+ *
+ * 1) Sayfadaki tüm formları listele (GET /{page-id}/leadgen_forms)
+ * 2) Her formun /leads endpoint'ini periyodik olarak tara
+ * 3) Daha önce işlenmemiş (yeni) lead'leri bul
+ * 4) Çok dilli alan adı eşleştirmesiyle (email/telefon/isim/şirket/
+ *    unvan/şehir/ülke/ürün grubu) ham veriyi ayıkla
+ * 5) IFCO referans verileriyle eşleştir, /badge/store'a kaydet
+ *
+ * Not: Webhook endpoint'i de (aşağıda) korunuyor - ileride Lead Access
+ * Manager izni düzelirse otomatik olarak devreye girer, zarar vermez.
  */
 
 const express = require("express");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 require("dotenv").config();
 
 const app = express();
@@ -28,27 +39,114 @@ const {
   META_VERIFY_TOKEN, // Meta webhook kurulumunda belirlediğiniz doğrulama string'i
   META_APP_SECRET, // Meta App Dashboard > Settings > Basic > App Secret
   META_ACCESS_TOKEN, // Sağladığınız Page/System User access token
+  META_PAGE_ID = "100664412375646", // IFCO - Istanbul Fashion Connection sayfa ID'si
   IFCO_API_BASE = "https://www.ifco.com.tr/api/meta-api",
   IFCO_API_TOKEN, // IFCO'dan ayrıca alınacak Bearer token
   GRAPH_API_VERSION = "v20.0",
+  POLL_INTERVAL_MINUTES = "5",
 } = process.env;
 
 // ---------------------------------------------------------------------------
-// FORM ALAN EŞLEŞTİRME AYARI
-// Meta lead formunuzdaki soru (question) key'lerini buraya göre düzenleyin.
-// Formu Meta'da oluştururken "field key" olarak bu isimleri kullanmanız
-// eşleştirmeyi çok daha güvenilir hale getirir.
+// ÇOK DİLLİ ALAN ADI EŞLEŞTİRME
+// Formlar 9 farklı dilde (Almanca, Portekizce, İtalyanca, İspanyolca,
+// Arapça, Fransızca, Rusça, İngilizce, Türkçe) olduğu için Meta'nın
+// oluşturduğu alan (field) adları dile göre değişiyor
+// (örn. "e-mail-adresse", "produktgruppen" gibi). Bu yüzden sabit
+// key eşleştirmesi yerine, alan adının içinde geçen anahtar kelimelere
+// bakarak otomatik sınıflandırma yapıyoruz.
 // ---------------------------------------------------------------------------
-const FIELD_MAP = {
-  full_name: "name",
-  email: "email",
-  phone_number: "gsm", // Meta genelde +90XXXXXXXXXX formatında E.164 döner
-  company_name: "company",
-  country: "country", // form cevabı ülke adı olmalı
-  city: "city", // form cevabı şehir adı olmalı
-  job_title: "title", // form cevabı unvan adı olmalı (ID'ye çevrilecek)
-  product_interest: "product_group", // form cevabı virgülle ayrılmış ürün grubu adları olabilir
+function normalizeKey(s = "") {
+  return s
+    .toString()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, ""); // aksanları temizle (ä->a, ş->s, ü->u vb.)
+}
+
+const FIELD_KEYWORDS = {
+  email: ["mail"],
+  gsm: ["telefon", "phone", "teléfono", "telefono", "téléphone", "telephone", "telefone", "телефон", "هاتف", "numero_de_tel"],
+  company: ["firma", "firm", "empresa", "entreprise", "azienda", "sirket", "şirket", "company", "компания", "شركة", "unternehmen"],
+  title: ["position", "posizione", "posicao", "poste", "cargo", "unvan", "должность", "منصب", "job_title", "jobtitle", "titel"],
+  city: ["stadt", "ciudad", "ville", "cidade", "citta", "città", "sehir", "şehir", "город", "مدينة", "city"],
+  country: ["land", "pais", "país", "pays", "paese", "ulke", "ülke", "страна", "بلد", "country"],
+  product_group: ["produkt", "product", "grupo", "groupe", "gruppo", "grup", "группа", "مجموعة", "urun", "ürün"],
+  name: ["vollstandig", "vollständig", "full_name", "fullname", "nombre_completo", "nom_complet", "nome_completo", "tam_ad", "ad_soyad", "полное_имя", "الاسم_الكامل"],
 };
+
+function classifyField(rawKey, value) {
+  const key = normalizeKey(rawKey);
+  // Email: hem alan adına hem de değere (@ işareti) bakıyoruz
+  if (FIELD_KEYWORDS.email.some((kw) => key.includes(kw))) return "email";
+  if (typeof value === "string" && /@/.test(value) && /\./.test(value)) return "email";
+
+  for (const [internalKey, keywords] of Object.entries(FIELD_KEYWORDS)) {
+    if (internalKey === "email") continue;
+    if (keywords.some((kw) => key.includes(kw))) return internalKey;
+  }
+
+  // Telefon numarası formatına benziyorsa (alan adından anlaşılamadıysa)
+  if (typeof value === "string" && /^\+?[\d\s()-]{7,}$/.test(value.trim())) {
+    return "gsm";
+  }
+
+  return null; // sınıflandırılamadı
+}
+
+// ---------------------------------------------------------------------------
+// TELEFON KODU AYIRMA
+// E.164 benzeri numaralardan (+49..., +90..., 0049... vb.) ülke kodunu
+// ayıklıyoruz. Yaygın çağrı kodlarını uzundan kısaya doğru deniyoruz.
+// ---------------------------------------------------------------------------
+const CALLING_CODES = [
+  "971", "966", "965", "974", "973", "968", "962", "961", "963", "964",
+  "212", "213", "216", "351", "352", "353", "354", "355", "356", "357",
+  "358", "420", "421",
+  "43", "41", "31", "32", "49", "90", "33", "39", "34", "44", "20",
+  "55", "52", "54", "46", "47", "48", "36", "40", "30",
+  "7", "1",
+].sort((a, b) => b.length - a.length);
+
+function parsePhone(raw = "") {
+  let digits = raw.replace(/[^\d]/g, "");
+  // 00 ile başlıyorsa uluslararası çağrı öneki, kaldır
+  if (digits.startsWith("00")) digits = digits.slice(2);
+  for (const code of CALLING_CODES) {
+    if (digits.startsWith(code)) {
+      return { ct_code_gsm: code, gsm: digits.slice(code.length) };
+    }
+  }
+  // Bilinmeyen kod: ilk 2 haneyi kod say, geri kalanı numara
+  return { ct_code_gsm: digits.slice(0, 2), gsm: digits.slice(2) };
+}
+
+// ---------------------------------------------------------------------------
+// ÜLKE ADI TAKMA ADLARI (ISO kod / yerel dil -> findBestMatch için ortak ad)
+// ---------------------------------------------------------------------------
+const COUNTRY_ALIASES = {
+  DE: "Germany", Deutschland: "Germany", Germany: "Germany",
+  TR: "Turkey", Türkiye: "Turkey", Turkiye: "Turkey", Turkey: "Turkey",
+  FR: "France", France: "France",
+  IT: "Italy", Italia: "Italy", Italy: "Italy",
+  ES: "Spain", "España": "Spain", Espana: "Spain", Spain: "Spain",
+  PT: "Portugal", Portugal: "Portugal",
+  RU: "Russia", "Россия": "Russia", Russia: "Russia",
+  GB: "United Kingdom", UK: "United Kingdom", "United Kingdom": "United Kingdom",
+  US: "United States", USA: "United States", "United States": "United States",
+  EG: "Egypt", Egypt: "Egypt",
+  SA: "Saudi Arabia", "Saudi Arabia": "Saudi Arabia",
+  AE: "United Arab Emirates", UAE: "United Arab Emirates",
+  QA: "Qatar", KW: "Kuwait", BH: "Bahrain", OM: "Oman",
+  JO: "Jordan", LB: "Lebanon", MA: "Morocco", DZ: "Algeria",
+  TN: "Tunisia", IQ: "Iraq", SY: "Syria",
+  AT: "Austria", CH: "Switzerland", NL: "Netherlands", BE: "Belgium",
+  BR: "Brazil", MX: "Mexico", AR: "Argentina",
+};
+
+function resolveCountryAlias(raw = "") {
+  const trimmed = raw.trim();
+  return COUNTRY_ALIASES[trimmed] || COUNTRY_ALIASES[trimmed.toUpperCase()] || raw;
+}
 
 // ---------------------------------------------------------------------------
 // Referans veri önbelleği (countries / cities / titles / product-groups)
@@ -132,7 +230,7 @@ function findBestMatch(input, list, labelField) {
 }
 
 // ---------------------------------------------------------------------------
-// Meta Graph API'den lead detayını çek
+// Meta Graph API'den lead detayını çek (tek lead - webhook yolunda kullanılır)
 // ---------------------------------------------------------------------------
 async function fetchLeadFromMeta(leadgenId) {
   const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${leadgenId}?access_token=${META_ACCESS_TOKEN}`;
@@ -141,39 +239,42 @@ async function fetchLeadFromMeta(leadgenId) {
     throw new Error(`Graph API hata: ${res.status} ${await res.text()}`);
   }
   const data = await res.json();
-  // field_data: [{ name: "email", values: ["x@y.com"] }, ...]
+  return fieldDataToRaw(data.field_data);
+}
+
+function fieldDataToRaw(fieldData) {
+  // field_data: [{ name: "e-mail-adresse", values: ["x@y.com"] }, ...]
   const raw = {};
-  for (const f of data.field_data || []) {
+  for (const f of fieldData || []) {
     raw[f.name] = f.values?.[0] ?? null;
   }
   return raw;
 }
 
 // ---------------------------------------------------------------------------
-// Ham form verisini IFCO badge/store formatına dönüştür
+// Ham form verisini (dile bakılmaksızın) IFCO badge/store formatına dönüştür
 // ---------------------------------------------------------------------------
 async function buildBadgePayload(rawFields) {
   const mapped = {};
-  for (const [metaKey, internalKey] of Object.entries(FIELD_MAP)) {
-    if (rawFields[metaKey] !== undefined) mapped[internalKey] = rawFields[metaKey];
-  }
-
-  // Telefon: E.164 formatından (+905427227652) alan kodu + numarayı ayır
-  let ct_code_gsm = "90";
-  let gsm = mapped.gsm || "";
-  if (gsm.startsWith("+")) {
-    // basit varsayım: Türkiye numaraları için +90 sonrası 10 hane
-    const digits = gsm.replace(/\D/g, "");
-    if (digits.startsWith("90")) {
-      ct_code_gsm = "90";
-      gsm = digits.slice(2);
+  const unclassified = [];
+  for (const [rawKey, value] of Object.entries(rawFields)) {
+    const internalKey = classifyField(rawKey, value);
+    if (internalKey) {
+      mapped[internalKey] = value;
     } else {
-      gsm = digits;
+      unclassified.push(rawKey);
     }
   }
+  if (unclassified.length) {
+    console.warn(`[lead] Sınıflandırılamayan alanlar: ${unclassified.join(", ")}`);
+  }
 
-  // Ülke eşleştirme
-  const countryMatch = findBestMatch(mapped.country, cache.countries, "common_name");
+  // Telefon: ülke koduna göre ayır
+  const { ct_code_gsm, gsm } = parsePhone(mapped.gsm || "");
+
+  // Ülke eşleştirme (önce takma ad çözümle, sonra IFCO listesiyle eşleştir)
+  const resolvedCountry = mapped.country ? resolveCountryAlias(mapped.country) : mapped.country;
+  const countryMatch = findBestMatch(resolvedCountry, cache.countries, "common_name");
   const countryName = countryMatch ? countryMatch.common_name : mapped.country;
 
   // Şehir eşleştirme (ülke bulunduysa)
@@ -288,34 +389,151 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-async function processLead(leadgenId) {
+async function processLead(leadgenId, rawFieldsOverride) {
   // Referans veri 1 saatten eskiyse yenile
   if (Date.now() - cache.lastRefresh > 60 * 60 * 1000) {
     await refreshReferenceData();
   }
 
-  const rawFields = await fetchLeadFromMeta(leadgenId);
-  console.log("[lead] Ham form verisi:", rawFields);
+  const rawFields = rawFieldsOverride || (await fetchLeadFromMeta(leadgenId));
+  console.log(`[lead ${leadgenId}] Ham form verisi:`, rawFields);
 
   const { payload, unmatched } = await buildBadgePayload(rawFields);
 
   if (!payload.email || !payload.title) {
     console.error(
-      `[lead] Zorunlu alan eksik/eşleşmedi (email veya title). Manuel kontrol gerekiyor. Lead: ${leadgenId}`,
+      `[lead ${leadgenId}] Zorunlu alan eksik/eşleşmedi (email veya unvan). Manuel kontrol gerekiyor.`,
       { payload, unmatched }
     );
-    // İsterseniz burada bir Slack/e-posta bildirimi tetikleyebilirsiniz.
-    return;
+    return false;
   }
 
   await submitBadge(payload);
+  return true;
+}
+
+// =============================================================================
+// POLLING MEKANİZMASI
+// Lead Access Manager izin sorunu nedeniyle webhook bildirimleri çalışmıyor.
+// Bunun yerine periyodik olarak sayfanın tüm formlarını tarayıp yeni
+// lead'leri kendimiz buluyoruz.
+// =============================================================================
+
+const STATE_FILE = path.join(__dirname, "poll-state.json");
+
+function loadState() {
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  } catch {
+    return { forms: {} }; // forms: { [formId]: lastCreatedTimeUnix }
+  }
+}
+
+function saveState(state) {
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  } catch (err) {
+    console.error("[poll] Durum dosyası kaydedilemedi:", err.message);
+  }
+}
+
+let pollState = loadState();
+
+async function graphGet(pathAndQuery) {
+  const sep = pathAndQuery.includes("?") ? "&" : "?";
+  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${pathAndQuery}${sep}access_token=${META_ACCESS_TOKEN}`;
+  const res = await fetch(url);
+  const json = await res.json();
+  if (!res.ok) {
+    throw new Error(`Graph API hata (${pathAndQuery}): ${res.status} ${JSON.stringify(json)}`);
+  }
+  return json;
+}
+
+async function listAllForms() {
+  const forms = [];
+  let next = `${META_PAGE_ID}/leadgen_forms?fields=id,name,status&limit=100`;
+  while (next) {
+    const json = await graphGet(next);
+    forms.push(...(json.data || []));
+    if (json.paging && json.paging.next) {
+      // paging.next zaten tam URL + token içeriyor, doğrudan fetch edelim
+      const res = await fetch(json.paging.next);
+      const nextJson = await res.json();
+      forms.push(...(nextJson.data || []));
+      next = null; // basitlik için 2 sayfa sonrası duruyoruz (form sayısı azdır)
+    } else {
+      next = null;
+    }
+  }
+  return forms.filter((f) => f.status === "ACTIVE");
+}
+
+async function pollForm(form) {
+  const json = await graphGet(
+    `${form.id}/leads?fields=created_time,field_data&limit=50`
+  );
+  const leads = json.data || [];
+  if (!leads.length) return;
+
+  const lastSeen = pollState.forms[form.id] || 0;
+  // Graph API en yeniden en eskiye doğru döner; kronolojik işlemek için ters çevir
+  const newLeads = leads
+    .filter((l) => new Date(l.created_time).getTime() / 1000 > lastSeen)
+    .reverse();
+
+  if (!newLeads.length) return;
+
+  console.log(`[poll] ${form.name}: ${newLeads.length} yeni lead bulundu`);
+
+  let maxCreated = lastSeen;
+  for (const lead of newLeads) {
+    const createdUnix = new Date(lead.created_time).getTime() / 1000;
+    try {
+      const raw = fieldDataToRaw(lead.field_data);
+      await processLead(lead.id, raw);
+    } catch (err) {
+      console.error(`[poll] Lead ${lead.id} işlenirken hata:`, err.message);
+    }
+    if (createdUnix > maxCreated) maxCreated = createdUnix;
+  }
+
+  pollState.forms[form.id] = maxCreated;
+  saveState(pollState);
+}
+
+async function pollAllForms() {
+  try {
+    if (Date.now() - cache.lastRefresh > 60 * 60 * 1000) {
+      await refreshReferenceData();
+    }
+    const forms = await listAllForms();
+    console.log(`[poll] ${forms.length} aktif form taranıyor...`);
+    for (const form of forms) {
+      // İlk kez görülen form: geçmişi işlemeye çalışmadan, şu andan itibaren takip et
+      if (pollState.forms[form.id] === undefined) {
+        pollState.forms[form.id] = Math.floor(Date.now() / 1000);
+        console.log(`[poll] Yeni form kaydedildi (geçmiş atlanıyor): ${form.name}`);
+        continue;
+      }
+      await pollForm(form);
+    }
+    saveState(pollState);
+  } catch (err) {
+    console.error("[poll] Genel tarama hatası:", err.message);
+  }
 }
 
 app.listen(PORT, async () => {
-  console.log(`Webhook sunucusu ${PORT} portunda çalışıyor`);
+  console.log(`Webhook/Polling sunucusu ${PORT} portunda çalışıyor`);
   try {
     await refreshReferenceData();
   } catch (err) {
     console.error("Başlangıç referans verisi çekilemedi:", err.message);
   }
+
+  const intervalMs = Number(POLL_INTERVAL_MINUTES) * 60 * 1000;
+  console.log(`[poll] Periyodik tarama her ${POLL_INTERVAL_MINUTES} dakikada bir çalışacak`);
+  await pollAllForms(); // başlangıçta bir kez çalıştır
+  setInterval(pollAllForms, intervalMs);
 });
