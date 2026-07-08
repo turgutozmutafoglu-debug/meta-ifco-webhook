@@ -1,106 +1,128 @@
-# Meta Lead Ads → IFCO Yaka Kartı Entegrasyonu
+# Meta Lead Ads → IFCO Yaka Kartı Entegrasyonu (Polling Sürümü)
 
 Bu sunucu, Meta (Facebook/Instagram) Lead Ads formlarından gelen ziyaretçi
 bilgilerini otomatik olarak IFCO'nun yaka kartı sistemine kaydeder.
 
+## Neden Webhook Değil, Polling?
+
+Normalde Meta, yeni bir lead geldiğinde sunucuya anlık bir bildirim
+(webhook) gönderir. Ancak bu proje için sayfanın bağlı olduğu Business
+Manager hesabında **Lead Access Manager** izin katmanı, App'in CRM
+olarak tanınmasına izin vermedi (sayfa ve App farklı işletme
+portföylerine ait olduğu için). Bu nedenle sunucu, webhook beklemek
+yerine **periyodik olarak** (varsayılan: her 5 dakikada bir) sayfanın
+tüm aktif formlarını tarayıp yeni lead'leri kendisi buluyor.
+
+Webhook endpoint'i (`/webhook`) kodda hâlâ duruyor — ileride Lead
+Access Manager izni düzeltilirse, Meta otomatik olarak bildirim
+göndermeye başlar ve sistem karma çalışır (zararı olmaz).
+
 ## Akış
 
 ```
-Ziyaretçi Meta formunu doldurur
+Her 5 dakikada bir:
         │
         ▼
-Meta → POST /webhook (sadece leadgen_id gönderir)
+Sunucu → Sayfanın tüm aktif formlarını listeler (GET /{page-id}/leadgen_forms)
         │
         ▼
-Sunucu → Graph API'den lead detayını çeker (META_ACCESS_TOKEN ile)
+Sunucu → Her formun son lead'lerini çeker (GET /{form-id}/leads)
         │
         ▼
-Sunucu → IFCO referans verileriyle eşleştirir (ülke/şehir/unvan/ürün grubu)
+Sunucu → Daha önce işlenmemiş (yeni) lead'leri tespit eder
         │
         ▼
-Sunucu → POST https://www.ifco.com.tr/api/meta-api/badge/store (IFCO_API_TOKEN ile)
+Sunucu → Çok dilli alan adı sınıflandırması yapar
+         (email/telefon/isim/şirket/unvan/şehir/ülke/ürün grubu)
+        │
+        ▼
+Sunucu → IFCO referans verileriyle eşleştirir
+        │
+        ▼
+Sunucu → POST https://www.ifco.com.tr/api/meta-api/badge/store
 ```
 
-## ÖNEMLİ: İki farklı token var
+## Çok Dilli Form Desteği
 
-- **META_ACCESS_TOKEN**: Bana ilettiğiniz `EAALf41...` ile başlayan token. Bu bir
-  **Meta/Facebook** erişim token'ı — lead verisini Graph API'den çekmek için
-  kullanılır. IFCO ile hiçbir ilgisi yok.
-- **IFCO_API_TOKEN**: IFCO'dan **ayrıca** talep etmeniz gereken bir token.
-  `/badge/store` ve diğer tüm IFCO endpoint'lerine erişim için gerekli.
+Formlarınız 9 farklı dilde (Almanca, Portekizce, İtalyanca, İspanyolca,
+Arapça, Fransızca, Rusça, İngilizce, Türkçe) olduğu için Meta'nın
+oluşturduğu alan adları da dile göre değişiyor (örn. Almanca formda
+"e-mail-adresse", "produktgruppen" gibi). Kod, sabit alan adı yerine
+her alanın içinde geçen **anahtar kelimelere** bakarak otomatik
+sınıflandırma yapıyor (`FIELD_KEYWORDS` listesi, `server.js` içinde).
 
-Bu token'ı benimle veya başka bir yerde paylaştıysanız, canlı bir kimlik
-bilgisidir — riskli. Mümkünse rotasyonunu (yenilenmesini) yapın ve ileride
-credential'ları sohbet/mesaj yerine `.env` dosyasında saklayın.
+Eğer bir dildeki form doğru sınıflandırılmıyorsa (loglarda
+`Sınıflandırılamayan alanlar: ...` uyarısı görürsünüz), o dile ait
+anahtar kelimeyi `FIELD_KEYWORDS` listesine eklemeniz yeterli.
+
+## Önemli: Geçmiş Lead'ler İşlenmez
+
+Sunucu ilk kez bir formu gördüğünde, o formun **geçmiş lead'lerini
+otomatik olarak IFCO'ya aktarmaz** — sadece o andan itibaren gelen
+yeni lead'leri işler. Bu, sistemin ilk çalıştırıldığında binlerce eski
+lead'i birden IFCO'ya göndermesini önlemek için bilinçli bir tasarım
+kararıdır. Geçmiş lead'leri manuel aktarmak isterseniz ayrı bir script
+yazılabilir.
 
 ## Kurulum
 
 ```bash
 npm install
 cp .env.example .env
-# .env dosyasını doldurun (META_ACCESS_TOKEN, IFCO_API_TOKEN, META_APP_SECRET, META_VERIFY_TOKEN)
+# .env dosyasını doldurun (META_ACCESS_TOKEN, META_PAGE_ID, IFCO_API_TOKEN vb.)
 npm start
 ```
 
 Node.js 18+ gerekir (global `fetch` kullanılıyor).
 
-## Meta tarafında yapılacaklar
+## ÖNEMLİ: İki farklı token var
 
-1. **Meta App Dashboard** → uygulamanızda **Webhooks** ürününü ekleyin.
-2. **Callback URL**: sunucunuzun herkese açık HTTPS adresi + `/webhook`
-   (örn. `https://sizin-domaininiz.com/webhook`). Yerelde test için
-   `ngrok` veya benzeri bir tünel kullanabilirsiniz.
-3. **Verify Token**: `.env` dosyasındaki `META_VERIFY_TOKEN` ile aynı değeri girin.
-4. **Subscription Fields**: `leadgen` alanını seçin.
-5. Sayfanızı (Page) uygulamaya **subscribe** edin (`/{page-id}/subscribed_apps`
-   endpoint'i ile `leadgen_ids` field'ı üzerinden, ya da Dashboard üzerinden).
-6. Kullandığınız `META_ACCESS_TOKEN`'ın bu sayfa için geçerli, leadgen okuma
-   izni (`leads_retrieval`) olan bir token olduğundan emin olun. Kısa ömürlü
-   bir kullanıcı token'ı yerine **sayfa token'ı** veya **sistem kullanıcısı
-   token'ı** (uzun ömürlü) kullanmanız production için önerilir.
+- **META_ACCESS_TOKEN**: Bir **Meta/Facebook Page Access Token** —
+  Graph API'den lead verisini çekmek ve form listesini almak için
+  kullanılır.
+- **IFCO_API_TOKEN**: IFCO'dan ayrıca alınmış bir token —
+  `/badge/store` ve diğer IFCO endpoint'lerine erişim için gerekli.
 
-## Meta form soruları hakkında önemli not
+`META_ACCESS_TOKEN` için **uzun ömürlü bir Page Access Token**
+kullanmanız önerilir (kısa ömürlü user token'lar birkaç saatte
+dolabilir, bu da polling'in sessizce durmasına yol açar). Token
+süresi dolduğunda Railway loglarında `Graph API hata` mesajları
+görürsünüz — bu durumda Graph API Explorer'dan yeni bir Page Access
+Token üretip Railway'deki değişkeni güncellemeniz gerekir.
 
-`server.js` içindeki `FIELD_MAP` objesi, Meta lead formunuzdaki soru key'lerini
-(`full_name`, `email`, `phone_number`, `company_name`, `country`, `city`,
-`job_title`, `product_interest`) IFCO alanlarına eşliyor. Formu Meta'da
-oluştururken:
+## Deployment (Railway)
 
-- Mümkünse **ülke / şehir / unvan / ürün grubu** sorularını serbest metin
-  yerine **açılır liste (dropdown)** yapın ve seçenekleri IFCO'nun referans
-  listeleriyle (`/countries`, `/cities`, `/titles`, `/product-groups`)
-  birebir aynı yazın. Bu, eşleştirme hatalarını neredeyse sıfıra indirir.
-- Serbest metin bırakırsanız, kod yaklaşık (fuzzy) eşleştirme yapar ama
-  yazım farklılıklarında (`Istanbul` vs `İstanbul` gibi) eşleşme
-  bulunamayabilir — bu durumlar loglanır, otomatik kayıt yapılmaz.
+1. Kodu GitHub'a push edin.
+2. Railway → New Project → Deploy from GitHub repo.
+3. Variables sekmesine `.env.example`'daki değişkenleri gerçek
+   değerleriyle girin.
+4. Settings → Networking → Generate Domain (opsiyonel, polling için
+   dışarıdan erişilebilir bir adrese ihtiyaç yok, ama webhook
+   endpoint'i için hazır bulunsun).
 
-Form'unuzdaki gerçek soru key'lerini Graph API üzerinden
-`GET /{form-id}` ile görüp `FIELD_MAP`'i buna göre güncelleyebilirsiniz.
+## İzleme
 
-## Zorunlu/opsiyonel alanlar (IFCO tarafı)
-
-| Alan | Zorunlu | Not |
-|---|---|---|
-| name, email, ct_code_gsm, gsm, company, country, title | Evet | `title` bir ID, eşleşmezse kayıt atlanır ve loglanır |
-| city, product_group | Hayır | Eşleşmezse boş geçilir |
-
-## Deployment önerisi
-
-Küçük/orta trafik için: Railway, Render, veya bir VPS üzerinde `pm2` ile
-çalıştırmak yeterli. HTTPS zorunludur (Meta webhook'ları sadece HTTPS kabul
-eder).
-
-```bash
-npm install -g pm2
-pm2 start server.js --name meta-ifco-webhook
-pm2 save
+Railway → Deploy Logs'ta şu satırları görürsünüz:
 ```
+[poll] N aktif form taranıyor...
+[poll] <form adı>: N yeni lead bulundu
+[lead <id>] Ham form verisi: {...}
+[IFCO] Kayıt sonucu: ...
+```
+
+Bir lead'in zorunlu alanları (email/unvan) eşleşmediyse:
+```
+[lead <id>] Zorunlu alan eksik/eşleşmedi (email veya unvan). Manuel kontrol gerekiyor.
+```
+Bu durumda o lead IFCO'ya kaydedilmez, log'da ham veri ve eşleşmeyen
+alanlar görünür — formdaki soru/cevap seçeneklerini IFCO'nun referans
+listeleriyle uyumlu hale getirmeniz gerekebilir.
 
 ## Güvenlik notları
 
-- `META_APP_SECRET` mutlaka doldurulmalı — bu olmadan `X-Hub-Signature-256`
-  doğrulaması atlanır ve herkes sahte lead POST edebilir.
-- Token'ları asla kod içine gömmeyin, `.env` kullanın ve `.env` dosyasını
-  git'e eklemeyin (`.gitignore`'a ekleyin).
-- IFCO_API_TOKEN'ı sadece bu sunucuda saklayın, front-end/istemci tarafına
-  asla göndermeyin.
+- Token'ları asla kod içine gömmeyin, sadece Railway Variables'ta
+  saklayın.
+- `poll-state.json` dosyası, hangi lead'lerin işlendiğini takip eder;
+  silinirse (veya container yeniden oluşturulursa) tüm formlar "yeni"
+  sayılıp o andan itibaren tekrar takip edilmeye başlanır (geçmiş
+  lead'ler yine atlanır).
