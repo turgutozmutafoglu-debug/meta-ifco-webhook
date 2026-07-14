@@ -149,6 +149,28 @@ function resolveCountryAlias(raw = "") {
 }
 
 // ---------------------------------------------------------------------------
+// Ülke eşleştirme: önce ISO kod (a2_iso alanı, dil bağımsız ve en güvenilir),
+// bulunamazsa isim bazlı bulanık eşleştirme.
+// ---------------------------------------------------------------------------
+function matchCountry(rawValue) {
+  if (!rawValue) return null;
+  const val = rawValue.toString().trim();
+
+  // 2 harfli ISO kod gibi görünüyorsa (Meta'nın ülke sorusu genelde bunu döner)
+  if (/^[A-Za-z]{2}$/.test(val)) {
+    const iso = val.toUpperCase();
+    const found = cache.countries.find(
+      (c) => (c.a2_iso || "").toUpperCase() === iso
+    );
+    if (found) return found;
+  }
+
+  // Yedek: takma ad çözümleyip isim bazlı bulanık eşleştir
+  const resolved = resolveCountryAlias(val);
+  return findBestMatch(resolved, cache.countries, "common_name");
+}
+
+// ---------------------------------------------------------------------------
 // Referans veri önbelleği (countries / cities / titles / product-groups)
 // Sık değişmeyen veriler olduğu için periyodik olarak yenileniyoruz.
 // ---------------------------------------------------------------------------
@@ -188,17 +210,19 @@ async function refreshReferenceData() {
   console.log(
     `[cache] Yenilendi: ${countries.length} ülke, ${titles.length} unvan, ${productGroups.length} ürün grubu`
   );
-  console.log("[cache] Unvan listesi:", titles.map((t) => t.baslik));
-  console.log("[cache] Ürün grubu listesi:", productGroups.map((p) => p.baslik));
+  console.log("[cache] Unvan listesi: " + JSON.stringify(titles.map((t) => t.baslik)));
+  console.log("[cache] Ürün grubu listesi: " + JSON.stringify(productGroups.map((p) => p.baslik)));
   console.log(
-    "[cache] Türkiye ile ilgili ülke kayıtları:",
-    countries.filter(
-      (c) => normalize(c.common_name).includes("turkiye") || normalize(c.common_name).includes("turkey")
-    )
+    "[cache] Türkiye ile ilgili ülke kayıtları: " +
+      JSON.stringify(
+        countries.filter(
+          (c) => normalize(c.common_name).includes("turkiye") || normalize(c.common_name).includes("turkey")
+        )
+      )
   );
   console.log(
-    "[cache] 'Yönetici' ile ilgili unvan kayıtları:",
-    titles.filter((t) => normalize(t.baslik).includes("yonet"))
+    "[cache] 'Yönetici' ile ilgili unvan kayıtları: " +
+      JSON.stringify(titles.filter((t) => normalize(t.baslik).includes("yonet")))
   );
 }
 
@@ -284,9 +308,10 @@ async function buildBadgePayload(rawFields) {
   // Telefon: ülke koduna göre ayır
   const { ct_code_gsm, gsm } = parsePhone(mapped.gsm || "");
 
-  // Ülke eşleştirme (önce takma ad çözümle, sonra IFCO listesiyle eşleştir)
-  const resolvedCountry = mapped.country ? resolveCountryAlias(mapped.country) : mapped.country;
-  const countryMatch = findBestMatch(resolvedCountry, cache.countries, "common_name");
+  // Ülke eşleştirme: önce 2 harfli ISO koduyla (Meta genelde bunu döndürür,
+  // IFCO listesinde de a2_iso alanı var - dil bağımsız en güvenilir yöntem).
+  // Bulunamazsa isim bazlı bulanık eşleştirmeye düşer.
+  const countryMatch = matchCountry(mapped.country);
   const countryName = countryMatch ? countryMatch.common_name : mapped.country;
 
   // Şehir eşleştirme (ülke bulunduysa)
