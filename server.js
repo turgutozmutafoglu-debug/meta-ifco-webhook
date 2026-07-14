@@ -222,7 +222,11 @@ async function refreshReferenceData() {
   );
   console.log(
     "[cache] 'Yönetici' ile ilgili unvan kayıtları: " +
-      JSON.stringify(titles.filter((t) => normalize(t.baslik).includes("yonet")))
+      JSON.stringify(
+        titles.filter((t) =>
+          extractLabelVariants(t.baslik).some((v) => normalize(v).includes("yonet"))
+        )
+      )
   );
 }
 
@@ -261,6 +265,35 @@ function findBestMatch(input, list, labelField) {
     (item) =>
       normalize(item[labelField]).includes(target) ||
       target.includes(normalize(item[labelField]))
+  );
+  return match || null;
+}
+
+// ---------------------------------------------------------------------------
+// IFCO'nun unvan/ürün grubu listesindeki "baslik" alanı düz metin DEĞİL,
+// çok dilli bir obje: { tr, en, de, es, fr, it, ru, ar }. Form cevabı
+// (hangi dilde olursa olsun) bu varyantlardan biriyle eşleşebilir, bu
+// yüzden hepsini tarıyoruz. (Eğer baslik düz string ise de çalışır.)
+// ---------------------------------------------------------------------------
+function extractLabelVariants(baslik) {
+  if (typeof baslik === "string") return [baslik];
+  if (baslik && typeof baslik === "object") return Object.values(baslik);
+  return [];
+}
+
+function findBestMultilangMatch(input, list) {
+  if (!input) return null;
+  const target = normalize(input);
+  // 1) herhangi bir dil varyantında tam eşleşme
+  let match = list.find((item) =>
+    extractLabelVariants(item.baslik).some((v) => normalize(v) === target)
+  );
+  if (match) return match;
+  // 2) herhangi bir dil varyantında içerir eşleşmesi
+  match = list.find((item) =>
+    extractLabelVariants(item.baslik).some(
+      (v) => normalize(v).includes(target) || target.includes(normalize(v))
+    )
   );
   return match || null;
 }
@@ -324,14 +357,14 @@ async function buildBadgePayload(rawFields) {
 
   // Unvan eşleştirme (zorunlu alan - bulunamazsa varsayılan ilk unvana düşmeyin,
   // loglayıp elle incelemeniz daha güvenli)
-  const titleMatch = findBestMatch(mapped.title, cache.titles, "baslik");
+  const titleMatch = findBestMultilangMatch(mapped.title, cache.titles);
 
   // Ürün grubu eşleştirme (virgülle ayrılmış olabilir)
   let productGroupIds = [];
   if (mapped.product_group) {
     const parts = mapped.product_group.split(",").map((s) => s.trim());
     for (const part of parts) {
-      const pgMatch = findBestMatch(part, cache.productGroups, "baslik");
+      const pgMatch = findBestMultilangMatch(part, cache.productGroups);
       if (pgMatch) productGroupIds.push(pgMatch.id);
     }
   }
