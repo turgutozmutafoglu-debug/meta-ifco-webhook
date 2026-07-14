@@ -66,12 +66,12 @@ function normalizeKey(s = "") {
 const FIELD_KEYWORDS = {
   email: ["mail"],
   gsm: ["telefon", "phone", "teléfono", "telefono", "téléphone", "telephone", "telefone", "телефон", "هاتف", "numero_de_tel"],
-  company: ["firma", "firm", "empresa", "entreprise", "azienda", "sirket", "şirket", "company", "компания", "شركة", "unternehmen"],
-  title: ["position", "posizione", "posicao", "poste", "cargo", "unvan", "должность", "منصب", "job_title", "jobtitle", "titel"],
+  company: ["firma", "firm", "empresa", "entreprise", "azienda", "sirket", "şirket", "company", "компани", "شركة", "unternehmen"],
+  title: ["position", "posizione", "posicao", "poste", "cargo", "unvan", "должность", "منصب", "job_title", "jobtitle", "titel", "وظيفي", "مسمى"],
   city: ["stadt", "ciudad", "ville", "cidade", "citta", "città", "sehir", "şehir", "город", "مدينة", "city"],
   country: ["land", "pais", "país", "pays", "paese", "ulke", "ülke", "страна", "بلد", "country"],
-  product_group: ["produkt", "product", "grupo", "groupe", "gruppo", "grup", "группа", "مجموعة", "urun", "ürün"],
-  name: ["vollstandig", "vollständig", "full_name", "fullname", "nombre_completo", "nom_complet", "nome_completo", "tam_ad", "ad_soyad", "полное_имя", "الاسم_الكامل"],
+  product_group: ["produkt", "product", "groduct", "grupo", "groupe", "gruppo", "grup", "группа", "مجموعة", "منتج", "urun", "ürün"],
+  name: ["vollstandig", "vollständig", "full_name", "fullname", "nombre_completo", "nom_complet", "nome_completo", "tam_ad", "ad_soyad", "soyad", "полное_имя", "الاسم_الكامل", "الاسم"],
 };
 
 function classifyField(rawKey, value) {
@@ -187,6 +187,18 @@ async function refreshReferenceData() {
   cache.lastRefresh = Date.now();
   console.log(
     `[cache] Yenilendi: ${countries.length} ülke, ${titles.length} unvan, ${productGroups.length} ürün grubu`
+  );
+  console.log("[cache] Unvan listesi:", titles.map((t) => t.baslik));
+  console.log("[cache] Ürün grubu listesi:", productGroups.map((p) => p.baslik));
+  console.log(
+    "[cache] Türkiye ile ilgili ülke kayıtları:",
+    countries.filter(
+      (c) => normalize(c.common_name).includes("turkiye") || normalize(c.common_name).includes("turkey")
+    )
+  );
+  console.log(
+    "[cache] 'Yönetici' ile ilgili unvan kayıtları:",
+    titles.filter((t) => normalize(t.baslik).includes("yonet"))
   );
 }
 
@@ -523,6 +535,28 @@ async function pollAllForms() {
     console.error("[poll] Genel tarama hatası:", err.message);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Manuel test endpoint'i: belirli bir lead ID'sini elle yeniden işler.
+// Poll döngüsünü beklemeden, düzeltmelerin gerçekten çalışıp çalışmadığını
+// (ve IFCO'ya kayıt gidip gitmediğini) anında test etmek için kullanılır.
+// Örnek: /admin/reprocess?secret=<META_VERIFY_TOKEN>&lead_id=851259777818019
+// ---------------------------------------------------------------------------
+app.get("/admin/reprocess", async (req, res) => {
+  if (req.query.secret !== META_VERIFY_TOKEN) {
+    return res.sendStatus(403);
+  }
+  const leadId = req.query.lead_id;
+  if (!leadId) {
+    return res.status(400).json({ error: "lead_id parametresi gerekli" });
+  }
+  try {
+    const ok = await processLead(leadId);
+    res.json({ processed: ok, lead_id: leadId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.listen(PORT, async () => {
   console.log(`Webhook/Polling sunucusu ${PORT} portunda çalışıyor`);
