@@ -252,7 +252,7 @@ function normalize(str = "") {
     .replace(/I/g, "ı")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "") // aksanları temizle (yaklaşık eşleştirme için)
-    .replace(/[_-]+/g, " ") // Meta'nın snake_case değerlerini (general_manager) boşluklu hale getir
+    .replace(/[_\-\u2010-\u2015]+/g, " ") // Meta'nın snake_case değerlerini (general_manager) VE özel tire karakterlerini (–, —) boşluklu hale getir
     .replace(/\s+/g, " ") // birden fazla boşluğu teke indir
     .trim();
 }
