@@ -67,7 +67,7 @@ const FIELD_KEYWORDS = {
   email: ["mail"],
   gsm: ["telefon", "phone", "teléfono", "telefono", "téléphone", "telephone", "telefone", "телефон", "هاتف", "numero_de_tel"],
   company: ["firma", "firm", "empresa", "entreprise", "azienda", "sirket", "şirket", "company", "компани", "شركة", "unternehmen"],
-  title: ["position", "posizione", "posicao", "poste", "cargo", "unvan", "должность", "منصب", "job_title", "jobtitle", "titel", "وظيفي", "مسمى"],
+  title: ["position", "posizione", "posicao", "poste", "cargo", "unvan", "должность", "منصب", "job_title", "jobtitle", "titel", "title", "وظيفي", "مسمى"],
   city: ["stadt", "ciudad", "ville", "cidade", "citta", "città", "sehir", "şehir", "город", "مدينة", "city"],
   country: ["land", "pais", "país", "pays", "paese", "ulke", "ülke", "страна", "بلد", "country"],
   product_group: ["produkt", "product", "groduct", "grupo", "groupe", "gruppo", "grup", "группа", "مجموعة", "منتج", "urun", "ürün"],
