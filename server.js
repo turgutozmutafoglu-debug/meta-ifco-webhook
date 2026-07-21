@@ -251,7 +251,10 @@ function normalize(str = "") {
     .replace(/İ/g, "i")
     .replace(/I/g, "ı")
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, ""); // aksanları temizle (yaklaşık eşleştirme için)
+    .replace(/[\u0300-\u036f]/g, "") // aksanları temizle (yaklaşık eşleştirme için)
+    .replace(/[_-]+/g, " ") // Meta'nın snake_case değerlerini (general_manager) boşluklu hale getir
+    .replace(/\s+/g, " ") // birden fazla boşluğu teke indir
+    .trim();
 }
 
 function findBestMatch(input, list, labelField) {
