@@ -247,9 +247,10 @@ function normalize(str = "") {
   return str
     .toString()
     .trim()
-    .toLocaleLowerCase("tr-TR")
-    .replace(/İ/g, "i")
-    .replace(/I/g, "ı")
+    .replace(/İ/g, "i") // Türkçe noktalı büyük İ -> i
+    .replace(/I/g, "i") // büyük I'yı da düz i'ye çeviriyoruz (tr-TR kuralına göre "ı" yapılırsa
+    // İngilizce kelimelerle (Influence, Interior vb.) eşleşme bozuluyordu)
+    .toLowerCase() // locale bağımsız küçük harfe çevirme
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "") // aksanları temizle (yaklaşık eşleştirme için)
     .replace(/[_\-\u2010-\u2015]+/g, " ") // Meta'nın snake_case değerlerini (general_manager) VE özel tire karakterlerini (–, —) boşluklu hale getir
