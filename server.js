@@ -399,7 +399,7 @@ async function submitBadge(payload) {
   });
   const json = await res.json();
   if (!res.ok) {
-    console.error("[IFCO] Kayıt hatası:", res.status, json);
+    console.error("[IFCO] Kayıt hatası: " + res.status + " " + JSON.stringify(json));
   } else {
     console.log("[IFCO] Kayıt sonucu:", json.message);
   }
@@ -469,14 +469,14 @@ async function processLead(leadgenId, rawFieldsOverride) {
   }
 
   const rawFields = rawFieldsOverride || (await fetchLeadFromMeta(leadgenId));
-  console.log(`[lead ${leadgenId}] Ham form verisi:`, rawFields);
+  console.log(`[lead ${leadgenId}] Ham form verisi: ` + JSON.stringify(rawFields));
 
   const { payload, unmatched } = await buildBadgePayload(rawFields);
 
   if (!payload.email || !payload.title) {
     console.error(
-      `[lead ${leadgenId}] Zorunlu alan eksik/eşleşmedi (email veya unvan). Manuel kontrol gerekiyor.`,
-      { payload, unmatched }
+      `[lead ${leadgenId}] Zorunlu alan eksik/eşleşmedi (email veya unvan). Manuel kontrol gerekiyor. ` +
+        JSON.stringify({ payload, unmatched })
     );
     return false;
   }
